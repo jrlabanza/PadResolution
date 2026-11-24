@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Process
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.DisplayMetrics
 import android.view.Display
@@ -16,6 +17,8 @@ import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.lsposed.hiddenapibypass.HiddenApiBypass
 
@@ -25,6 +28,7 @@ class DisplayChangeException(message: String) : Exception(message)
 class DisplayController(private val context: Context) {
 
   private val windowManager by lazy { WindowManagerBridge() }
+  private val prefs = context.getSharedPreferences("display", Context.MODE_PRIVATE)
 
   private val display: Display
     get() = context.getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY)
@@ -56,6 +60,12 @@ class DisplayController(private val context: Context) {
   /** Switches the display to [target] and waits until the system reports the new values. */
   suspend fun apply(target: DisplayConfig): Result<Unit> =
     withContext(Dispatchers.IO) {
+      // The screen and the background game watcher can both ask for a change; one at a time.
+      changeLock.withLock { applyLocked(target) }
+    }
+
+  private suspend fun applyLocked(target: DisplayConfig): Result<Unit> =
+    run {
       try {
         val native = nativeConfig()
         val before = currentConfig()
@@ -99,27 +109,114 @@ class DisplayController(private val context: Context) {
    * setting only exists on Xiaomi software, and nothing happens when the tablet uses buttons.
    */
   private suspend fun remeasureGestureNavigation() {
-    val resolver = context.contentResolver
-    if (Settings.Global.getInt(resolver, GESTURE_NAVIGATION_SETTING, 0) != 1) return
+    // Buttons are the user's choice; leave them alone. "Owed" means an earlier attempt of
+    // ours left gestures off, so off is not the user's choice.
+    if (!gesturesOn() && !gesturesOwed) return
     // Never stop halfway: that would leave the tablet on button navigation.
     withContext(NonCancellable) {
+      gesturesOwed = true
       try {
-        Settings.Global.putInt(resolver, GESTURE_NAVIGATION_SETTING, 0)
-        delay(GESTURE_NAVIGATION_OFF_MS)
+        setGestures(false)
+        // Switching back on before the system has really gone to buttons does nothing: a busy
+        // launcher sees "off, on" as no change and never measures. Fixed waits were not
+        // enough right after a resolution change, so wait for the system to say it is done.
+        awaitNavigationMode(NAVIGATION_MODE_BUTTONS)
+        // Even then the launcher needs a little longer to finish, or it re-measures from
+        // stale numbers. Holding for this long made the difference in testing.
+        delay(GESTURE_NAVIGATION_OFF_HOLD_MS)
       } finally {
-        Settings.Global.putInt(resolver, GESTURE_NAVIGATION_SETTING, 1)
+        setGestures(true)
       }
-      delay(GESTURE_NAVIGATION_SETTLE_MS)
+      // The launcher can also write "off" itself a moment late, undoing our "on". Put it back
+      // if so, and finish once the system confirms it is on gestures again.
+      val giveUpAt = SystemClock.elapsedRealtime() + GESTURE_NAVIGATION_LIMIT_MS
+      while (SystemClock.elapsedRealtime() < giveUpAt) {
+        delay(GESTURE_NAVIGATION_CHECK_MS)
+        if (!gesturesOn()) {
+          setGestures(true)
+        } else if (navigationMode() == NAVIGATION_MODE_GESTURES) {
+          break
+        }
+      }
+      delay(GESTURE_NAVIGATION_ON_SETTLE_MS)
+      if (gesturesOn()) gesturesOwed = false
     }
   }
+
+  /** Waits until Android reports [mode] as its navigation mode, or a time limit passes. */
+  private suspend fun awaitNavigationMode(mode: Int) {
+    val giveUpAt = SystemClock.elapsedRealtime() + GESTURE_NAVIGATION_LIMIT_MS
+    while (SystemClock.elapsedRealtime() < giveUpAt) {
+      delay(GESTURE_NAVIGATION_CHECK_MS)
+      val now = navigationMode()
+      if (now == mode) return
+      if (now == null) {
+        // This Android version will not let the app read the mode; fall back to a long wait.
+        delay(GESTURE_NAVIGATION_BLIND_WAIT_MS)
+        return
+      }
+    }
+  }
+
+  /** Android's own record of the navigation style in use, or null if the app may not read it. */
+  private fun navigationMode(): Int? =
+    try {
+      Settings.Secure.getInt(context.contentResolver, NAVIGATION_MODE_SETTING, -1).takeIf { it >= 0 }
+    } catch (e: SecurityException) {
+      null
+    }
+
+  /**
+   * Switches gesture navigation back on if an earlier resolution change was cut off before it
+   * could, for example because the app was closed at that moment. Safe to call at any time.
+   */
+  fun restoreGesturesIfOwed() {
+    if (!gesturesOwed) return
+    try {
+      setGestures(true)
+      gesturesOwed = false
+    } catch (e: SecurityException) {
+      // The permission has gone; it will be tried again once setup has been redone.
+    }
+  }
+
+  private fun gesturesOn(): Boolean =
+    Settings.Global.getInt(context.contentResolver, GESTURE_NAVIGATION_SETTING, 0) == 1
+
+  private fun setGestures(on: Boolean) {
+    Settings.Global.putInt(context.contentResolver, GESTURE_NAVIGATION_SETTING, if (on) 1 else 0)
+  }
+
+  /** Saved to disk, so it is still known after the app has been closed and reopened. */
+  private var gesturesOwed: Boolean
+    get() = prefs.getBoolean(KEY_GESTURES_OWED, false)
+    set(value) {
+      prefs.edit().putBoolean(KEY_GESTURES_OWED, value).commit()
+    }
 
   companion object {
     const val PERMISSION = "android.permission.WRITE_SECURE_SETTINGS"
 
+    /** Shared by every instance, since they all change the one display. */
+    private val changeLock = Mutex()
+
     /** Xiaomi's "full screen gestures" switch: 1 for swipe gestures, 0 for the three buttons. */
     private const val GESTURE_NAVIGATION_SETTING = "force_fsg_nav_bar"
-    private const val GESTURE_NAVIGATION_OFF_MS = 800L
-    private const val GESTURE_NAVIGATION_SETTLE_MS = 800L
+    /**
+     * Android's record of the navigation style actually in use. It changes a moment after
+     * the Xiaomi switch above, once the system has finished switching, which makes it the
+     * signal to wait for.
+     */
+    private const val NAVIGATION_MODE_SETTING = "navigation_mode"
+    private const val NAVIGATION_MODE_BUTTONS = 0
+    private const val NAVIGATION_MODE_GESTURES = 2
+
+    private const val GESTURE_NAVIGATION_CHECK_MS = 100L
+    private const val GESTURE_NAVIGATION_OFF_HOLD_MS = 1600L
+    private const val GESTURE_NAVIGATION_ON_SETTLE_MS = 600L
+    private const val GESTURE_NAVIGATION_LIMIT_MS = 6000L
+    private const val GESTURE_NAVIGATION_BLIND_WAIT_MS = 2500L
+    private const val KEY_GESTURES_OWED = "gestures_owed"
     private const val VERIFY_ATTEMPTS = 30
     private const val VERIFY_INTERVAL_MS = 100L
   }

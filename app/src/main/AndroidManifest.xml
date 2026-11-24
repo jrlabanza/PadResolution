@@ -12,11 +12,31 @@
         tools:ignore="ProtectedPermissions" />
 
     <!--
-      Lets the app find out which app is the home screen, to open its App info page, and
-      whether Shizuku is installed, to offer setup without a computer.
+      Automatic switching for games. Usage access (switched on by the user in Settings) tells
+      the app which app is on screen; the rest keep the watcher running in the background,
+      show its notification, and start it again after a restart.
+    -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- To ask the user, with Android's own prompt, to let the watcher keep running. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!--
+      Lets the app find out which app is the home screen, to open its App info page, whether
+      Shizuku is installed, to offer setup without a computer, and which apps have a home
+      screen icon, to list them as possible games.
     -->
     <queries>
         <package android:name="moe.shizuku.privileged.api" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.HOME" />
@@ -38,6 +58,24 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Watches for the user's games and switches the display for them. -->
+        <service
+            android:name=".games.GameWatchService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Switches the display resolution while a game the user chose is on screen" />
+        </service>
+
+        <receiver
+            android:name=".games.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <!-- How the Shizuku service hands this app its connection. Only Shizuku can call it. -->
         <provider

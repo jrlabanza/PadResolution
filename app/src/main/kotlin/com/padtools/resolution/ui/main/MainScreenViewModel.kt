@@ -2,6 +2,7 @@ package com.padtools.resolution.ui.main
 
 import android.app.Application
 import android.content.Intent
+import android.os.PowerManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.padtools.resolution.display.DisplayConfig
@@ -13,6 +14,15 @@ import com.padtools.resolution.display.SetupStatus
 import com.padtools.resolution.display.ShizukuSetup
 import com.padtools.resolution.display.ShizukuState
 import com.padtools.resolution.display.readSetupStatus
+import com.padtools.resolution.games.ForegroundAppWatcher
+import com.padtools.resolution.games.GameStore
+import com.padtools.resolution.games.GameSwitcher
+import com.padtools.resolution.games.GameWatchService
+import com.padtools.resolution.games.InstalledApp
+import com.padtools.resolution.games.appLabel
+import com.padtools.resolution.games.launchIntent
+import com.padtools.resolution.games.launchableApps
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,6 +30,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
 
 data class MainUiState(
@@ -34,6 +45,15 @@ data class MainUiState(
   val shizukuBusy: Boolean = false,
   /** Why Shizuku's last attempt at setup failed; null when it has not failed. */
   val shizukuError: String? = null,
+  val games: List<GameRow> = emptyList(),
+  /** The user wants the display switched by itself when one of [games] is opened. */
+  val autoSwitch: Boolean = false,
+  /** Android's Usage access is on, so the app can tell which app is in front. */
+  val usageAccess: Boolean = false,
+  /** The app is exempt from battery optimisation, so HyperOS does not pause the watcher. */
+  val backgroundAllowed: Boolean = false,
+  /** Apps to choose from while the "Add a game" picker is open; null while it is closed. */
+  val gamePicker: List<InstalledApp>? = null,
   val busy: Boolean = false,
   /** Seconds left to confirm a change before it is undone; null when nothing is waiting. */
   val confirmSecondsLeft: Int? = null,
@@ -47,9 +67,15 @@ data class MainUiState(
     get() = hasPermission && !busy && confirmSecondsLeft == null && current != native
 }
 
+/** One of the user's games, as the list shows it. */
+data class GameRow(val packageName: String, val label: String, val mode: ResolutionMode)
+
 class MainScreenViewModel(application: Application) : AndroidViewModel(application) {
   private val controller = DisplayController(application)
   private val shizuku = ShizukuSetup(application)
+  private val games = GameStore(application)
+  private val gameSwitcher = GameSwitcher(controller, games)
+  private val foregroundApp = ForegroundAppWatcher(application)
   private val pendingRevert = PendingRevertStore(application)
   private var countdown: Job? = null
 
@@ -69,6 +95,7 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
     Shizuku.addBinderReceivedListenerSticky(onShizukuStarted)
     Shizuku.addBinderDeadListener(onShizukuStopped)
     Shizuku.addRequestPermissionResultListener(onShizukuAccess)
+    controller.restoreGesturesIfOwed()
 
     // A change was never confirmed last time (the app was closed mid-countdown): undo it now.
     if (pendingRevert.load() != null) {
@@ -90,10 +117,82 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
         hasPermission = hasPermission,
         setup = readSetupStatus(getApplication()),
         shizuku = shizukuState,
+        games = gameRows(),
+        autoSwitch = games.autoSwitch,
+        usageAccess = foregroundApp.hasUsageAccess(),
+        backgroundAllowed =
+          getApplication<Application>()
+            .getSystemService(PowerManager::class.java)
+            .isIgnoringBatteryOptimizations(getApplication<Application>().packageName),
       )
     }
     if (!hasPermission) continueShizukuSetup(shizukuState, automatic = true)
+    GameWatchService.startIfWanted(getApplication())
   }
+
+  fun setAutoSwitch(on: Boolean) {
+    // Turning it off needs no more than this: the watcher sees the change within a second,
+    // puts the display back if a game had changed it, and stops itself.
+    games.autoSwitch = on
+    refresh()
+  }
+
+  fun openGamePicker() {
+    viewModelScope.launch {
+      val apps =
+        withContext(Dispatchers.Default) {
+          launchableApps(getApplication()).filter { games.modeFor(it.packageName) == null }
+        }
+      _uiState.update { it.copy(gamePicker = apps) }
+    }
+  }
+
+  fun closeGamePicker() {
+    _uiState.update { it.copy(gamePicker = null) }
+  }
+
+  fun addGame(packageName: String) {
+    games.setGame(packageName, ResolutionMode.P1200)
+    _uiState.update { it.copy(gamePicker = null) }
+    refresh()
+  }
+
+  fun setGameMode(packageName: String, mode: ResolutionMode) {
+    games.setGame(packageName, mode)
+    refresh()
+  }
+
+  fun removeGame(packageName: String) {
+    games.removeGame(packageName)
+    refresh()
+  }
+
+  /**
+   * Switches to the game's resolution, then opens it. Doing it in this order means the game
+   * starts at the resolution it will run at, which a game opened from the home screen cannot.
+   */
+  fun playGame(packageName: String) {
+    val mode = games.modeFor(packageName) ?: return
+    val open = launchIntent(getApplication(), packageName)
+    if (open == null) {
+      _uiState.update { it.copy(error = "That game is no longer installed.") }
+      return
+    }
+    if (_uiState.value.busy) return
+    _uiState.update { it.copy(busy = true, error = null) }
+    viewModelScope.launch {
+      val result = gameSwitcher.enter(mode)
+      _uiState.update {
+        it.copy(busy = false, current = controller.currentConfig(), error = result.exceptionOrNull()?.message)
+      }
+      if (result.isSuccess) getApplication<Application>().startActivity(open)
+    }
+  }
+
+  private fun gameRows(): List<GameRow> =
+    games.games()
+      .map { GameRow(it.packageName, appLabel(getApplication(), it.packageName), it.mode) }
+      .sortedBy { it.label.lowercase() }
 
   /** The setup guide's Shizuku button: retries whichever step is next, even if already tried. */
   fun setUpWithShizuku() = continueShizukuSetup(shizuku.state(), automatic = false)
@@ -149,6 +248,8 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
     if (!state.canApply) return
     val target = state.target
     val previous = controller.currentConfig()
+    // A change made by hand is the user taking over: the game watcher must not undo it later.
+    games.displayBeforeGame = null
     _uiState.update { it.copy(busy = true, error = null) }
     viewModelScope.launch {
       pendingRevert.save(previous)
@@ -179,6 +280,7 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
   fun resetToDefault() {
     val state = _uiState.value
     if (!state.canReset) return
+    games.displayBeforeGame = null
     _uiState.update { it.copy(busy = true, error = null) }
     viewModelScope.launch {
       val result = controller.apply(state.native)

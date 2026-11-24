@@ -1,11 +1,17 @@
 package com.padtools.resolution.ui.main
 
+import android.Manifest
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -29,6 +35,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
@@ -69,6 +76,8 @@ import kotlin.math.roundToInt
 fun MainScreen(viewModel: MainScreenViewModel = viewModel()) {
   val state by viewModel.uiState.collectAsStateWithLifecycle()
   val context = LocalContext.current
+  val askForNotifications =
+    rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { viewModel.setAutoSwitch(true) }
 
   LifecycleResumeEffect(Unit) {
     viewModel.refresh()
@@ -103,6 +112,39 @@ fun MainScreen(viewModel: MainScreenViewModel = viewModel()) {
         // Shizuku was uninstalled a moment ago; the next refresh hides this option.
       }
     },
+    gameActions =
+      GameActions(
+        setAutoSwitch = { on ->
+          // The watcher's permanent notification needs this permission on Android 13 and up.
+          // Ask once when switching on; the watcher runs either way.
+          val mustAsk =
+            on &&
+              Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+              context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+          if (mustAsk) askForNotifications.launch(Manifest.permission.POST_NOTIFICATIONS) else viewModel.setAutoSwitch(on)
+        },
+        openUsageAccess = { context.openSettings(Settings.ACTION_USAGE_ACCESS_SETTINGS) },
+        allowBackground = {
+          // On plain Android this is a yes/no prompt. HyperOS opens the app's battery page
+          // instead, where "No restrictions" is the choice that grants the same exemption.
+          context.open(
+            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.fromParts("package", context.packageName, null))
+              .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+          )
+        },
+        openAppInfo = {
+          context.open(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null))
+              .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+          )
+        },
+        openPicker = viewModel::openGamePicker,
+        closePicker = viewModel::closeGamePicker,
+        add = viewModel::addGame,
+        setMode = viewModel::setGameMode,
+        remove = viewModel::removeGame,
+        play = viewModel::playGame,
+      ),
   )
 }
 
@@ -119,6 +161,7 @@ internal fun MainScreen(
   onDismissError: () -> Unit,
   onSetUpWithShizuku: () -> Unit,
   onOpenShizuku: () -> Unit,
+  gameActions: GameActions,
 ) {
   Scaffold(topBar = { CenterAlignedTopAppBar(title = { Text("Pad Resolution") }) }) { innerPadding ->
     Box(
@@ -134,6 +177,8 @@ internal fun MainScreen(
         ResolutionPicker(state, onSelectMode)
         UiSizeCard(state, onUiScaleChange)
         Actions(state, onApply, onReset)
+        HorizontalDivider()
+        GamesSection(state, gameActions)
       }
     }
   }
