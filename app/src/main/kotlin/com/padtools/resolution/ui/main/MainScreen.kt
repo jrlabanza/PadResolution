@@ -143,6 +143,8 @@ fun MainScreen(viewModel: MainScreenViewModel = viewModel()) {
         add = viewModel::addGame,
         setMode = viewModel::setGameMode,
         remove = viewModel::removeGame,
+        addShortcut = viewModel::addGameShortcut,
+        closeShortcutHelp = viewModel::closeShortcutHelp,
         play = viewModel::playGame,
       ),
   )

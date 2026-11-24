@@ -19,9 +19,12 @@ import com.padtools.resolution.games.GameStore
 import com.padtools.resolution.games.GameSwitcher
 import com.padtools.resolution.games.GameWatchService
 import com.padtools.resolution.games.InstalledApp
+import com.padtools.resolution.games.RunningApps
 import com.padtools.resolution.games.appLabel
+import com.padtools.resolution.games.hasGameShortcut
 import com.padtools.resolution.games.launchIntent
 import com.padtools.resolution.games.launchableApps
+import com.padtools.resolution.games.requestGameShortcut
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -31,6 +34,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import rikka.shizuku.Shizuku
 
 data class MainUiState(
@@ -54,6 +58,8 @@ data class MainUiState(
   val backgroundAllowed: Boolean = false,
   /** Apps to choose from while the "Add a game" picker is open; null while it is closed. */
   val gamePicker: List<InstalledApp>? = null,
+  /** The home screen did not add a game shortcut the user asked for. */
+  val shortcutBlocked: Boolean = false,
   val busy: Boolean = false,
   /** Seconds left to confirm a change before it is undone; null when nothing is waiting. */
   val confirmSecondsLeft: Int? = null,
@@ -76,6 +82,7 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
   private val games = GameStore(application)
   private val gameSwitcher = GameSwitcher(controller, games)
   private val foregroundApp = ForegroundAppWatcher(application)
+  private val runningApps = RunningApps(application)
   private val pendingRevert = PendingRevertStore(application)
   private var countdown: Job? = null
 
@@ -95,7 +102,8 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
     Shizuku.addBinderReceivedListenerSticky(onShizukuStarted)
     Shizuku.addBinderDeadListener(onShizukuStopped)
     Shizuku.addRequestPermissionResultListener(onShizukuAccess)
-    controller.restoreGesturesIfOwed()
+    // Not while a game holds the display: this fix-up is one of the things that closes games.
+    if (!gameSwitcher.isSwitched) controller.restoreGesturesIfOwed()
 
     // A change was never confirmed last time (the app was closed mid-countdown): undo it now.
     if (pendingRevert.load() != null) {
@@ -181,12 +189,42 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
     if (_uiState.value.busy) return
     _uiState.update { it.copy(busy = true, error = null) }
     viewModelScope.launch {
+      // A game that is already open cannot live through the change: it would come back
+      // broken, or close as the user returns to it. Close it now so it starts afresh.
+      val mustRestart = !gameSwitcher.isAt(mode) && runningApps.isRunning(packageName) == true
+      if (mustRestart) runningApps.close(packageName)
       val result = gameSwitcher.enter(mode)
+      if (result.isSuccess && mustRestart) {
+        withTimeoutOrNull(CLOSE_GAME_LIMIT_MS) {
+          while (runningApps.isRunning(packageName) == true) {
+            runningApps.close(packageName)
+            delay(CLOSE_GAME_CHECK_MS)
+          }
+        }
+      }
       _uiState.update {
         it.copy(busy = false, current = controller.currentConfig(), error = result.exceptionOrNull()?.message)
       }
-      if (result.isSuccess) getApplication<Application>().startActivity(open)
+      if (result.isSuccess) {
+        GameWatchService.startIfWanted(getApplication())
+        getApplication<Application>().startActivity(open)
+      }
     }
+  }
+
+  /** Puts an icon on the home screen that does what Play does. */
+  fun addGameShortcut(packageName: String) {
+    val asked = requestGameShortcut(getApplication(), packageName)
+    viewModelScope.launch {
+      // HyperOS refuses silently until the user allows "Home screen shortcuts" for the app,
+      // so the only way to tell is to look whether the shortcut turned up.
+      if (asked) delay(SHORTCUT_CHECK_AFTER_MS)
+      if (!hasGameShortcut(getApplication(), packageName)) _uiState.update { it.copy(shortcutBlocked = true) }
+    }
+  }
+
+  fun closeShortcutHelp() {
+    _uiState.update { it.copy(shortcutBlocked = false) }
   }
 
   private fun gameRows(): List<GameRow> =
@@ -344,5 +382,8 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
 
   private companion object {
     const val CONFIRM_SECONDS = 15
+    const val CLOSE_GAME_LIMIT_MS = 3_000L
+    const val CLOSE_GAME_CHECK_MS = 250L
+    const val SHORTCUT_CHECK_AFTER_MS = 1_500L
   }
 }

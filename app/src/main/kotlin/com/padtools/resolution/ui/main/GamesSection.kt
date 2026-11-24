@@ -45,6 +45,8 @@ internal class GameActions(
   val add: (packageName: String) -> Unit,
   val setMode: (packageName: String, ResolutionMode) -> Unit,
   val remove: (packageName: String) -> Unit,
+  val addShortcut: (packageName: String) -> Unit,
+  val closeShortcutHelp: () -> Unit,
   val play: (packageName: String) -> Unit,
 )
 
@@ -59,9 +61,11 @@ internal fun GamesSection(state: MainUiState, actions: GameActions) {
       verticalAlignment = Alignment.CenterVertically,
     ) {
       Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("Switch automatically for games", style = MaterialTheme.typography.titleMedium)
+        Text("Switch back when the game closes", style = MaterialTheme.typography.titleMedium)
         Text(
-          "Lowers the resolution when one of your games opens and puts it back when you leave.",
+          "Start a game with Play, or with its home screen shortcut, and it opens at its lower " +
+            "resolution. The tablet stays there while the game is open, even if you step out " +
+            "for a moment, and goes back once you close the game.",
           style = MaterialTheme.typography.bodyMedium,
           color = secondary,
         )
@@ -69,7 +73,7 @@ internal fun GamesSection(state: MainUiState, actions: GameActions) {
       Switch(
         checked = state.autoSwitch,
         onCheckedChange = actions.setAutoSwitch,
-        modifier = Modifier.semantics { contentDescription = "Switch automatically for games" },
+        modifier = Modifier.semantics { contentDescription = "Switch back when the game closes" },
       )
     }
 
@@ -95,11 +99,21 @@ internal fun GamesSection(state: MainUiState, actions: GameActions) {
 
     OutlinedButton(onClick = actions.openPicker) { Text("Add a game") }
 
+    if (state.games.isNotEmpty()) {
+      Text(
+        "A game opened from its own icon keeps whatever resolution the tablet is at. Changing " +
+          "the resolution while a game is open makes the game restart, so it is only changed " +
+          "before the game starts.",
+        style = MaterialTheme.typography.bodyMedium,
+        color = secondary,
+      )
+    }
+
     if (state.autoSwitch && state.games.isNotEmpty()) {
       NoteWithButton(
         text =
-          "After the tablet restarts, open Pad Resolution once to start watching again, or " +
-            "allow Autostart for it so that happens by itself.",
+          "After the tablet restarts, or after you clear all recent apps, open Pad Resolution " +
+            "once to start watching again, or allow Autostart for it so that happens by itself.",
         button = "Open App info",
         onClick = actions.openAppInfo,
       )
@@ -107,6 +121,30 @@ internal fun GamesSection(state: MainUiState, actions: GameActions) {
   }
 
   state.gamePicker?.let { apps -> GamePicker(apps, onPick = actions.add, onClose = actions.closePicker) }
+
+  if (state.shortcutBlocked) {
+    AlertDialog(
+      onDismissRequest = actions.closeShortcutHelp,
+      title = { Text("Shortcut not added") },
+      text = {
+        Text(
+          "HyperOS blocks home screen shortcuts until you allow them. Open App info, then " +
+            "Other permissions, and allow Home screen shortcuts. Then tap Add to home screen again."
+        )
+      },
+      confirmButton = {
+        TextButton(
+          onClick = {
+            actions.closeShortcutHelp()
+            actions.openAppInfo()
+          }
+        ) {
+          Text("Open App info")
+        }
+      },
+      dismissButton = { TextButton(onClick = actions.closeShortcutHelp) { Text("Close") } },
+    )
+  }
 }
 
 @Composable
@@ -130,8 +168,11 @@ private fun GameCard(game: GameRow, state: MainUiState, actions: GameActions) {
             )
           }
         }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          TextButton(onClick = { actions.addShortcut(game.packageName) }) { Text("Add to home screen") }
+          TextButton(onClick = { actions.remove(game.packageName) }) { Text("Remove") }
+        }
       }
-      TextButton(onClick = { actions.remove(game.packageName) }) { Text("Remove") }
       Button(onClick = { actions.play(game.packageName) }, enabled = state.hasPermission && !state.busy) {
         Text("Play")
       }
