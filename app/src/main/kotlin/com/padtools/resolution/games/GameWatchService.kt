@@ -1,5 +1,6 @@
 package com.padtools.resolution.games
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -98,7 +99,7 @@ class GameWatchService : Service() {
     var appInFront: String? = null
     var inFrontSince = 0L
     var restartOfferedFor: String? = null
-    var notificationSaysPlaying = switcher.isSwitched
+    var notificationSays = statusText()
 
     while (scope.isActive) {
       delay(CHECK_INTERVAL_MS)
@@ -151,12 +152,20 @@ class GameWatchService : Service() {
         }
       }
 
-      // Rewrite the notification only when what it says has changed.
-      if (switcher.isSwitched != notificationSaysPlaying) {
-        notificationSaysPlaying = switcher.isSwitched
+      // Rewrite the notification only when what it says has changed. Comparing the words,
+      // not just "is a game playing": the new size is only there once the switch has finished.
+      val status = statusText()
+      if (status != notificationSays) {
+        notificationSays = status
         notifications.notify(NOTIFICATION_ID, notification())
       }
     }
+  }
+
+  private fun statusText(): String {
+    if (!switcher.isSwitched) return "Watching for your games."
+    val now = controller.currentConfig()
+    return "Staying at ${now.width} × ${now.height} until you close the game."
   }
 
   private fun notification(): Notification {
@@ -169,8 +178,8 @@ class GameWatchService : Service() {
         .setContentIntent(openApp)
         .setOngoing(true)
         .setOnlyAlertOnce(true)
-    if (::switcher.isInitialized && switcher.isSwitched) {
-      val now = controller.currentConfig()
+    builder.setContentText(statusText())
+    if (switcher.isSwitched) {
       val goBack =
         PendingIntent.getService(
           this,
@@ -178,11 +187,7 @@ class GameWatchService : Service() {
           Intent(this, GameWatchService::class.java).setAction(ACTION_RETURN_NOW),
           PendingIntent.FLAG_IMMUTABLE,
         )
-      builder
-        .setContentText("Staying at ${now.width} × ${now.height} until you close the game.")
-        .addAction(0, "Go back now (closes the game)", goBack)
-    } else {
-      builder.setContentText("Watching for your games.")
+      builder.addAction(0, "Go back now (closes the game)", goBack)
     }
     return builder.build()
   }
@@ -216,18 +221,52 @@ class GameWatchService : Service() {
     private const val OFFER_AFTER_OPENING_MS = 2_000L
     private const val RETURN_AFTER_CLOSING_MS = 3_000L
 
-    /** Starts the watcher if the user has switched it on and picked at least one game. */
+    private const val WAKE_UP_EVERY_MS = 30_000L
+
+    /**
+     * Starts the watcher if the user has switched it on and picked at least one game. Safe
+     * to call at any time, including while it is already running.
+     */
     fun startIfWanted(context: Context) {
       val store = GameStore(context)
-      if (!store.autoSwitch || store.games().isEmpty()) return
-      ContextCompat.startForegroundService(context, Intent(context, GameWatchService::class.java))
+      val wakeUp =
+        PendingIntent.getBroadcast(
+          context,
+          0,
+          Intent(context, WakeUpReceiver::class.java),
+          PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+      val alarms = context.getSystemService(AlarmManager::class.java)
+      if (!store.autoSwitch || store.games().isEmpty()) {
+        alarms.cancel(wakeUp)
+        return
+      }
+      // HyperOS closes the whole app on "Clear all" and does not start the watcher again,
+      // which would leave the tablet at a game's resolution after the game is closed. So the
+      // watcher keeps an alarm set for itself, to start it again if it has gone. With Autostart
+      // off HyperOS blocks that too, which is why the main screen asks for Autostart. The
+      // alarm does not wake a sleeping tablet: nothing needs watching while the screen is off.
+      alarms.set(AlarmManager.ELAPSED_REALTIME, SystemClock.elapsedRealtime() + WAKE_UP_EVERY_MS, wakeUp)
+      try {
+        ContextCompat.startForegroundService(context, Intent(context, GameWatchService::class.java))
+      } catch (e: IllegalStateException) {
+        // Android refused a start from the background. The next alarm tries again.
+      }
     }
   }
 }
 
-/** Starts the watcher again after the tablet restarts. */
+/** Starts the watcher again after the tablet restarts, or the app is updated. */
 class BootReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
-    if (intent.action == Intent.ACTION_BOOT_COMPLETED) GameWatchService.startIfWanted(context)
+    when (intent.action) {
+      Intent.ACTION_BOOT_COMPLETED,
+      Intent.ACTION_MY_PACKAGE_REPLACED -> GameWatchService.startIfWanted(context)
+    }
   }
+}
+
+/** The watcher's alarm for itself: starts it again if HyperOS has closed the app. */
+class WakeUpReceiver : BroadcastReceiver() {
+  override fun onReceive(context: Context, intent: Intent) = GameWatchService.startIfWanted(context)
 }

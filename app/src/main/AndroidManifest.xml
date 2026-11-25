@@ -49,6 +49,7 @@
     </queries>
 
     <application
+        android:name=".PadResolutionApp"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -101,8 +102,14 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- The watcher's alarm for itself, in case HyperOS closes the app. -->
+        <receiver
+            android:name=".games.WakeUpReceiver"
+            android:exported="false" />
 
         <!-- How the Shizuku service hands this app its connection. Only Shizuku can call it. -->
         <provider

@@ -21,6 +21,7 @@ import com.padtools.resolution.games.GameWatchService
 import com.padtools.resolution.games.InstalledApp
 import com.padtools.resolution.games.RunningApps
 import com.padtools.resolution.games.appLabel
+import com.padtools.resolution.games.autostartAllowed
 import com.padtools.resolution.games.hasGameShortcut
 import com.padtools.resolution.games.launchIntent
 import com.padtools.resolution.games.launchableApps
@@ -56,6 +57,8 @@ data class MainUiState(
   val usageAccess: Boolean = false,
   /** The app is exempt from battery optimisation, so HyperOS does not pause the watcher. */
   val backgroundAllowed: Boolean = false,
+  /** HyperOS's Autostart switch for the app; null when the tablet has none or will not say. */
+  val autostartAllowed: Boolean? = null,
   /** Apps to choose from while the "Add a game" picker is open; null while it is closed. */
   val gamePicker: List<InstalledApp>? = null,
   /** The home screen did not add a game shortcut the user asked for. */
@@ -132,6 +135,7 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
           getApplication<Application>()
             .getSystemService(PowerManager::class.java)
             .isIgnoringBatteryOptimizations(getApplication<Application>().packageName),
+        autostartAllowed = autostartAllowed(getApplication()),
       )
     }
     if (!hasPermission) continueShizukuSetup(shizukuState, automatic = true)

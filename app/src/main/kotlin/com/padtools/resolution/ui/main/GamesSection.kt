@@ -109,11 +109,18 @@ internal fun GamesSection(state: MainUiState, actions: GameActions) {
       )
     }
 
-    if (state.autoSwitch && state.games.isNotEmpty()) {
+    if (state.autoSwitch && state.games.isNotEmpty() && state.autostartAllowed != true) {
       NoteWithButton(
         text =
-          "After the tablet restarts, or after you clear all recent apps, open Pad Resolution " +
-            "once to start watching again, or allow Autostart for it so that happens by itself.",
+          if (state.autostartAllowed == false) {
+            "Autostart is off for Pad Resolution. If HyperOS closes it while a game is open, " +
+              "which \"Clear all\" in recent apps does, the tablet stays at the game's " +
+              "resolution until you open Pad Resolution or pull down Quick Settings. Open App " +
+              "info and turn on Autostart."
+          } else {
+            "After the tablet restarts, or after you clear all recent apps, open Pad Resolution " +
+              "once to start watching again, or allow Autostart for it so that happens by itself."
+          },
         button = "Open App info",
         onClick = actions.openAppInfo,
       )
