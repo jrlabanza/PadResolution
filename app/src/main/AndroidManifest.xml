@@ -75,6 +75,27 @@
                 android:value="Switches the display resolution while a game the user chose is on screen" />
         </service>
 
+        <!-- The list the tile opens. A task of its own, so it never brings the main screen along. -->
+        <activity
+            android:name=".tile.ResolutionChooserActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:theme="@style/Theme.PadResolution.Chooser" />
+
+        <!-- The Quick Settings tile for switching resolution from the pull-down shade. -->
+        <service
+            android:name=".tile.ResolutionTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_stat_resolution"
+            android:label="Resolution"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
         <receiver
             android:name=".games.BootReceiver"
             android:exported="true">

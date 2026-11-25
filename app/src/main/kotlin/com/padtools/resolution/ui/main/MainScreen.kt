@@ -47,7 +47,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -69,6 +71,7 @@ import com.padtools.resolution.display.DisplayMath
 import com.padtools.resolution.display.ResolutionMode
 import com.padtools.resolution.display.ShizukuState
 import com.padtools.resolution.display.homeScreenAppInfoIntent
+import com.padtools.resolution.tile.ResolutionTileService
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
@@ -179,6 +182,7 @@ internal fun MainScreen(
         ResolutionPicker(state, onSelectMode)
         UiSizeCard(state, onUiScaleChange)
         Actions(state, onApply, onReset)
+        if (state.hasPermission) QuickSettingsNote()
         HorizontalDivider()
         GamesSection(state, gameActions)
       }
@@ -530,6 +534,44 @@ private fun Actions(state: MainUiState, onApply: () -> Unit, onReset: () -> Unit
     }
     Spacer(Modifier.height(4.dp))
     TextButton(onClick = onReset, enabled = state.canReset) { Text("Reset to tablet default") }
+  }
+}
+
+/** Offers the Quick Settings tile, the way to switch without opening the app. */
+@Composable
+private fun QuickSettingsNote() {
+  val context = LocalContext.current
+  var added by remember { mutableStateOf(ResolutionTileService.isAdded(context)) }
+  // Android's "add this tile?" prompt was shown and the tile was not added.
+  var declined by remember { mutableStateOf(false) }
+  Row(
+    modifier = Modifier.fillMaxWidth(),
+    horizontalArrangement = Arrangement.spacedBy(16.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Text(
+      when {
+        added -> "The Resolution tile is in your Quick Settings. Pull down the shade to switch from anywhere."
+        declined || !ResolutionTileService.canOfferTile ->
+          "To switch without opening this app, edit your Quick Settings and add the Resolution tile."
+        else -> "Switch without opening this app: add the Resolution tile to your Quick Settings."
+      },
+      modifier = Modifier.weight(1f),
+      style = MaterialTheme.typography.bodyMedium,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    if (ResolutionTileService.canOfferTile && !added) {
+      OutlinedButton(
+        onClick = {
+          ResolutionTileService.offerTile(context) { nowAdded ->
+            added = nowAdded
+            declined = !nowAdded
+          }
+        }
+      ) {
+        Text("Add tile")
+      }
+    }
   }
 }
 

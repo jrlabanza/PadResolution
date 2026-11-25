@@ -2,4 +2,11 @@
 <resources>
 
     <style name="Theme.PadResolution" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <!-- The tile's chooser: nothing of its own on screen, only the dialog it shows. -->
+    <style name="Theme.PadResolution.Chooser">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
 </resources>
